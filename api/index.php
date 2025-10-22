@@ -304,7 +304,7 @@ $types = ['kontrak','fulltime','freelance','remote','hybrid','part time'];
 .card-glass{ margin-top:-40px; background:var(--card-bg); border:1px solid var(--card-bd); border-radius:16px; box-shadow:0 14px 40px rgba(0,0,0,.10); }
 .btn-add{ --bs-btn-padding-y:.3rem; --bs-btn-padding-x:.6rem; --bs-btn-font-size:.9rem; }
 .table thead th{ white-space:nowrap; }
-.badge-status{ font-weight:600; letter-spacing:.2px; }
+.badge-status{ font-weight:600; letter-spacing:.2px;  color: #111;}
 .badge-status.dilamar{ background:#e7f1ff; color:#0d6efd; }
 .badge-status.ditolak{ background:#fde8e8; color:#c1121f; }
 .badge-status.diterima{ background:#e6f7ed; color:#0f8b3e; }
