@@ -1,7 +1,7 @@
 <?php
 /******************************************************
  * Job Application Tracker (Turso HTTP, single-file)
- * Charts + CRUD + DataTables + SweetAlert2
+ * Charts + CRUD + DataTables + SweetAlert2 + Filters
  * 
  * Deploy on Vercel using vercel-php runtime.
  * Requires ENV: TURSO_URL (HTTP + /v2/pipeline), TURSO_TOKEN
@@ -120,9 +120,9 @@ try {
     applied_date TEXT,   -- YYYY-MM-DD
     updated_date TEXT,   -- YYYY-MM-DD
     status       TEXT,   -- dilamar, ditolak, diterima, tidak ada respon, interview, tes tulis, psikotes, mini project
-    salary       TEXT,   -- gaji (bebas: angka atau rentang)
-    source_link  TEXT,   -- URL
-    source_text  TEXT,   -- teks tampilan link
+    salary       TEXT,   -- gaji (free text, kita parse angka jika memungkinkan)
+    source_link  TEXT,   -- URL (opsional)
+    source_text  TEXT,   -- teks tampilan link (opsional)
     created_at   TEXT,
     updated_at   TEXT
   )");
@@ -144,11 +144,69 @@ try {
 function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
 function today(){ return date('Y-m-d'); }
 
+/**
+ * Parse salary string → number (IDR) best-effort.
+ * Mendukung: "6.000.000", "6jt", "6 juta", "6-8 jt", "6 – 8 juta", "7k", "700rb", "7.5 jt".
+ * Return null jika tidak bisa diparse.
+ */
+function parse_salary($txt) {
+  if (!$txt) return null;
+  $s = mb_strtolower(trim($txt), 'UTF-8');
+  // ganti pemisah ribuan jadi kosong, koma jadi titik desimal jika perlu
+  $s = str_replace(['rp',' ', "\xc2\xa0"], '', $s); // hapus 'rp' & spasi termasuk nbsp
+  // Tangani penanda range: "-", "–", "sampai", "to"
+  $parts = preg_split('#\s*(?:-|–|sampai|to)\s*#u', $s);
+  $nums = [];
+  foreach ($parts as $p) {
+    $p = trim($p);
+    if ($p==='') continue;
+    // multiplier
+    $mult = 1;
+    if (preg_match('#(jt|juta)#u', $p)) $mult = 1000000;
+    elseif (preg_match('#(rb|ribu)#u', $p)) $mult = 1000;
+    elseif (preg_match('#\bk\b#u', $p)) $mult = 1000;
+
+    // ambil angka: 7.500.000 / 7,5 / 7500000
+    if (preg_match('#(\d{1,3}(?:[.\s]\d{3})+|\d+(?:[.,]\d+)?)#u', $p, $m)) {
+      $raw = $m[1];
+      // jika ada titik sebagai ribuan, buang. Jika koma sebagai desimal, ubah ke titik
+      $norm = str_replace('.', '', $raw);
+      $norm = str_replace(',', '.', $norm);
+      if (is_numeric($norm)) {
+        $val = floatval($norm);
+        // jika ada penanda "jt/juta/k/rb/ribu" dan angka kecil (misal 6), kali multiplier
+        if ($mult > 1 && $val < 10000) {
+          $val *= $mult;
+        }
+        // jika tidak ada multiplier tapi angka nampaknya jutaan dg ribuan, biarkan
+        $nums[] = $val;
+      }
+    }
+  }
+  if (!$nums) return null;
+  // jika range → rata-rata
+  $avg = array_sum($nums) / count($nums);
+  return $avg;
+}
+function format_idr_short($n){
+  if ($n === null) return '-';
+  if ($n >= 1000000000) return number_format($n/1000000000, 2).' M';
+  if ($n >= 1000000)    return number_format($n/1000000, 2).' Jt';
+  if ($n >= 1000)       return number_format($n/1000, 2).' Rb';
+  return number_format($n,0,',','.');
+}
+
 /* ========= POST handlers ========= */
 $flash = null;
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   $action = $_POST['action'] ?? '';
   try {
+    // Visible input "source_mix" + "as_url" → isi ke hidden source_text/source_link
+    $source_mix = trim($_POST['source_mix'] ?? '');
+    $as_url     = isset($_POST['as_url']) && $_POST['as_url']=='1';
+    $source_text = $source_mix ?: '';
+    $source_link = $as_url ? $source_mix : '';
+
     if ($action === 'create') {
       turso_exec(
         "INSERT INTO jobs (company_name, job_title, location, job_type, applied_date, updated_date, status, salary, source_link, source_text, created_at, updated_at)
@@ -162,8 +220,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
           trim($_POST['updated_date'] ?? ''),
           trim($_POST['status'] ?? ''),
           trim($_POST['salary'] ?? ''),
-          trim($_POST['source_link'] ?? ''),
-          trim($_POST['source_text'] ?? ''),
+          $source_link,
+          $source_text,
           date('Y-m-d H:i:s'),
           date('Y-m-d H:i:s')
         ]
@@ -183,8 +241,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
           trim($_POST['updated_date'] ?? ''),
           trim($_POST['status'] ?? ''),
           trim($_POST['salary'] ?? ''),
-          trim($_POST['source_link'] ?? ''),
-          trim($_POST['source_text'] ?? ''),
+          $source_link,
+          $source_text,
           date('Y-m-d H:i:s'),
           $id
         ]
@@ -216,22 +274,48 @@ try {
 function kv($rows, $k) {
   $out=[]; foreach ($rows as $r){ $out[$r[$k] ?? ''] = (int)($r['cnt'] ?? 0); } return $out;
 }
+$statuses_list = ['dilamar','ditolak','diterima','tidak ada respon','interview','tes tulis','psikotes','mini project'];
+
 $stats = [
   'total'     => turso_exec("SELECT COUNT(*) AS n FROM jobs")['rows'][0]['n'] ?? 0,
   'diterima'  => turso_exec("SELECT COUNT(*) AS n FROM jobs WHERE status='diterima'")['rows'][0]['n'] ?? 0,
   'ditolak'   => turso_exec("SELECT COUNT(*) AS n FROM jobs WHERE status='ditolak'")['rows'][0]['n'] ?? 0,
   'interview' => turso_exec("SELECT COUNT(*) AS n FROM jobs WHERE status='interview'")['rows'][0]['n'] ?? 0,
 ];
-$groupStatus = kv(turso_exec("SELECT COALESCE(status,'') AS grp, COUNT(*) AS cnt FROM jobs GROUP BY grp")['rows'], 'grp');
+$groupStatusRaw = kv(turso_exec("SELECT COALESCE(status,'') AS grp, COUNT(*) AS cnt FROM jobs GROUP BY grp")['rows'], 'grp');
+// pastikan urutan label fix
+$groupStatus = [];
+foreach ($statuses_list as $s) { $groupStatus[$s] = (int)($groupStatusRaw[$s] ?? 0); }
+
 $groupType   = kv(turso_exec("SELECT COALESCE(job_type,'') AS grp, COUNT(*) AS cnt FROM jobs GROUP BY grp")['rows'], 'grp');
 $trendRows   = turso_exec("SELECT substr(applied_date,1,7) AS ym, COUNT(*) AS cnt FROM jobs WHERE applied_date IS NOT NULL AND applied_date!='' GROUP BY ym ORDER BY ym")['rows'];
 $trendYM=[]; $trendV=[];
 foreach ($trendRows as $t){ if(!empty($t['ym'])){ $trendYM[]=$t['ym']; $trendV[]=(int)$t['cnt']; } }
 
+// Gaji rata-rata (overall & per status)
+$all_salaries = [];
+$salary_by_status = [];
+foreach ($rows as $r){
+  $val = parse_salary($r['salary'] ?? '');
+  if ($val !== null) {
+    $all_salaries[] = $val;
+    $st = strtolower($r['status'] ?? '');
+    if (!isset($salary_by_status[$st])) $salary_by_status[$st] = [];
+    $salary_by_status[$st][] = $val;
+  }
+}
+$avg_salary_overall = $all_salaries ? array_sum($all_salaries)/count($all_salaries) : null;
+$avg_salary_status = [];
+foreach ($statuses_list as $st){
+  if (!empty($salary_by_status[$st])) {
+    $avg_salary_status[$st] = array_sum($salary_by_status[$st])/count($salary_by_status[$st]);
+  } else {
+    $avg_salary_status[$st] = null;
+  }
+}
+
 /* ========= Options ========= */
 $types    = ['kontrak','fulltime','freelance','remote','hybrid','part time'];
-$statuses = ['dilamar','ditolak','diterima','tidak ada respon','interview','tes tulis','psikotes','mini project'];
-
 ?>
 <!doctype html>
 <html lang="id">
@@ -272,6 +356,7 @@ $statuses = ['dilamar','ditolak','diterima','tidak ada respon','interview','tes 
 .badge-status.tes\ tulis{ background:#f3e8ff; color:#6f42c1; }
 .badge-status.psikotes{ background:#e6fffb; color:#0aa; }
 .badge-status.mini\ project{ background:#e8f5e9; color:#2e7d32; }
+.badge-salary{ background:#eef9ff; color:#0b6aa6; font-weight:600; }
 @media (max-width: 576px){ .table td{ font-size:.92rem; } }
 .small-mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size:.9rem; }
 </style>
@@ -285,9 +370,25 @@ $statuses = ['dilamar','ditolak','diterima','tidak ada respon','interview','tes 
         <h1 class="h3 mb-1">Tracker Lamaran Kerja</h1>
         <div class="opacity-75">Pantau semua proses rekrutmen di satu tempat</div>
       </div>
-      <button class="btn btn-light btn-add shadow-sm" data-bs-toggle="modal" data-bs-target="#modalForm">
-        <i class="bi bi-plus-lg me-1"></i> Tambah
-      </button>
+      <div class="d-flex align-items-center gap-2">
+        <!-- Filters -->
+        <select id="filterStatus" class="form-select form-select-sm" style="width:auto">
+          <option value="">Status: Semua</option>
+          <?php foreach($statuses_list as $s): ?>
+          <option value="<?=h($s)?>"><?=h(ucwords($s))?></option>
+          <?php endforeach; ?>
+        </select>
+        <select id="filterType" class="form-select form-select-sm" style="width:auto">
+          <option value="">Tipe: Semua</option>
+          <?php foreach($types as $t): ?>
+          <option value="<?=h($t)?>"><?=h(ucfirst($t))?></option>
+          <?php endforeach; ?>
+        </select>
+
+        <button class="btn btn-light btn-add shadow-sm" data-bs-toggle="modal" data-bs-target="#modalForm">
+          <i class="bi bi-plus-lg me-1"></i> Tambah
+        </button>
+      </div>
     </div>
   </div>
 </header>
@@ -298,26 +399,33 @@ $statuses = ['dilamar','ditolak','diterima','tidak ada respon','interview','tes 
     <div class="row g-3 mb-3">
       <div class="col-6 col-md-3">
         <div class="border rounded-3 p-3 bg-white h-100">
-          <div class="text-muted small">Total Lamaran</div>
+          <div class="text-muted small">Jumlah Dikirim (Total)</div>
           <div class="fs-3 fw-bold"><?= (int)$stats['total'] ?></div>
         </div>
       </div>
-      <div class="col-6 col-md-3">
+      <div class="col-6 col-md-2">
         <div class="border rounded-3 p-3 bg-white h-100">
           <div class="text-muted small">Diterima</div>
           <div class="fs-3 fw-bold text-success"><?= (int)$stats['diterima'] ?></div>
         </div>
       </div>
-      <div class="col-6 col-md-3">
+      <div class="col-6 col-md-2">
         <div class="border rounded-3 p-3 bg-white h-100">
           <div class="text-muted small">Interview</div>
           <div class="fs-3 fw-bold text-warning"><?= (int)$stats['interview'] ?></div>
         </div>
       </div>
-      <div class="col-6 col-md-3">
+      <div class="col-6 col-md-2">
         <div class="border rounded-3 p-3 bg-white h-100">
           <div class="text-muted small">Ditolak</div>
           <div class="fs-3 fw-bold text-danger"><?= (int)$stats['ditolak'] ?></div>
+        </div>
+      </div>
+      <div class="col-12 col-md-3">
+        <div class="border rounded-3 p-3 bg-white h-100">
+          <div class="text-muted small">Rata-rata Gaji (parsable)</div>
+          <div class="fs-5 fw-bold"><?= $avg_salary_overall !== null ? 'Rp '.format_idr_short($avg_salary_overall) : '—' ?></div>
+          <div class="small text-muted">Input bebas (cth: 6–8 jt); hanya nilai yang bisa diparse dihitung.</div>
         </div>
       </div>
     </div>
@@ -327,7 +435,7 @@ $statuses = ['dilamar','ditolak','diterima','tidak ada respon','interview','tes 
       <div class="col-12 col-lg-6">
         <div class="border rounded-3 p-3 bg-white">
           <div class="d-flex justify-content-between align-items-center mb-2">
-            <div class="fw-semibold">Distribusi Status</div>
+            <div class="fw-semibold">Status Lamaran (lengkap)</div>
             <div class="small text-muted">Bar</div>
           </div>
           <canvas id="chartStatus" height="170"></canvas>
@@ -350,6 +458,15 @@ $statuses = ['dilamar','ditolak','diterima','tidak ada respon','interview','tes 
           </div>
           <canvas id="chartTrend" height="100"></canvas>
           <div class="small text-muted mt-2">Format bulan: <span class="small-mono">YYYY-MM</span> diambil dari “Tanggal Melamar”.</div>
+        </div>
+      </div>
+      <div class="col-12">
+        <div class="border rounded-3 p-3 bg-white">
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <div class="fw-semibold">Rata-rata Gaji per Status</div>
+            <div class="small text-muted">Bar</div>
+          </div>
+          <canvas id="chartSalaryStatus" height="120"></canvas>
         </div>
       </div>
     </div>
@@ -384,17 +501,18 @@ $statuses = ['dilamar','ditolak','diterima','tidak ada respon','interview','tes 
               <?php $cls = strtolower((string)($r['status'] ?? '')); ?>
               <span class="badge badge-status <?=str_replace(' ', ' ', $cls)?>"><?=h($r['status'] ?? '')?></span>
             </td>
-            <td><?=h($r['salary'] ?? '')?></td>
+            <td><span class="badge badge-salary"><?=h($r['salary'] ?? '')?></span></td>
             <td>
               <?php
                 $st = $r['source_text'] ?? '';
                 $sl = $r['source_link'] ?? '';
-                if(!empty($sl) || !empty($st)):
+                if($sl){
+                  $label = $st ?: $sl;
+                  echo '<a href="'.h($sl).'" target="_blank" rel="noopener" class="link-primary text-truncate" style="max-width:240px;display:inline-block">'.h($label).'</a>';
+                } elseif ($st) {
+                  echo '<span class="text-body">'.h($st).'</span>';
+                }
               ?>
-                <a href="<?=h($sl ?: '#')?>" target="_blank" rel="noopener" class="link-primary text-truncate" style="max-width:240px;display:inline-block">
-                  <?=h($st ?: $sl)?>
-                </a>
-              <?php endif; ?>
             </td>
             <td>
               <div class="d-flex gap-2">
@@ -442,6 +560,9 @@ $statuses = ['dilamar','ditolak','diterima','tidak ada respon','interview','tes 
       <div class="modal-body">
         <input type="hidden" name="action" id="formAction" value="create">
         <input type="hidden" name="id" id="formId" value="">
+        <!-- hidden yang diisi otomatis -->
+        <input type="hidden" name="source_text" id="source_text">
+        <input type="hidden" name="source_link" id="source_link">
         <div class="row g-3">
           <div class="col-12">
             <label class="form-label">Nama Perusahaan <span class="text-danger">*</span></label>
@@ -474,20 +595,24 @@ $statuses = ['dilamar','ditolak','diterima','tidak ada respon','interview','tes 
             <label class="form-label">Status Lamaran</label>
             <select name="status" id="status" class="form-select">
               <option value="">— Pilih —</option>
-              <?php foreach($statuses as $s): ?><option value="<?=h($s)?>"><?=h(ucwords($s))?></option><?php endforeach; ?>
+              <?php foreach($statuses_list as $s): ?><option value="<?=h($s)?>"><?=h(ucwords($s))?></option><?php endforeach; ?>
             </select>
           </div>
           <div class="col-md-6">
             <label class="form-label">Gaji</label>
             <input type="text" name="salary" id="salary" class="form-control" placeholder="cth: 6.000.000 / 6–8 jt / negotiable">
           </div>
-          <div class="col-md-6">
-            <label class="form-label">Teks Link</label>
-            <input type="text" name="source_text" id="source_text" class="form-control" placeholder="cth: JobStreet / LinkedIn">
-          </div>
-          <div class="col-md-6">
-            <label class="form-label">URL Link</label>
-            <input type="url" name="source_link" id="source_link" class="form-control" placeholder="https://...">
+
+          <div class="col-12">
+            <label class="form-label">Link/Asal (isi teks atau URL)</label>
+            <div class="input-group">
+              <input type="text" id="source_mix" name="source_mix" class="form-control" placeholder="cth: LinkedIn / https://...">
+              <span class="input-group-text">
+                <input class="form-check-input mt-0" type="checkbox" id="as_url" name="as_url" value="1" aria-label="Tautkan sebagai URL">
+              </span>
+              <span class="input-group-text small">Tautkan sebagai URL</span>
+            </div>
+            <div class="form-text">Centang jika ingin diperlakukan sebagai tautan. Kalau tidak, disimpan sebagai teks saja.</div>
           </div>
         </div>
       </div>
@@ -534,6 +659,27 @@ $statuses = ['dilamar','ditolak','diterima','tidak ada respon','interview','tes 
     }
   });
 
+  // Filters: Status (col 6), Type (col 3)
+  const statusColIdx = 6;
+  const typeColIdx   = 3;
+
+  $('#filterStatus').on('change', function(){
+    const val = this.value;
+    if (!val) {
+      dt.column(statusColIdx).search('').draw();
+    } else {
+      dt.column(statusColIdx).search('^'+val+'$', true, false).draw(); // exact match
+    }
+  });
+  $('#filterType').on('change', function(){
+    const val = this.value;
+    if (!val) {
+      dt.column(typeColIdx).search('').draw();
+    } else {
+      dt.column(typeColIdx).search(val, true, false).draw();
+    }
+  });
+
   // Delete confirm
   $(document).on('click','.btn-delete', function(){
     const $form = $(this).closest('form');
@@ -557,8 +703,14 @@ $statuses = ['dilamar','ditolak','diterima','tidak ada respon','interview','tes 
       $('#updated_date').val(btn.dataset.updated || '');
       $('#status').val(btn.dataset.status);
       $('#salary').val(btn.dataset.salary || '');
-      $('#source_link').val(btn.dataset.link || '');
-      $('#source_text').val(btn.dataset.linktext || '');
+      // mix input: jika ada link → isi source_mix=link & centang; kalau tidak → pakai text
+      if (btn.dataset.link) {
+        $('#source_mix').val(btn.dataset.link);
+        $('#as_url').prop('checked', true);
+      } else {
+        $('#source_mix').val(btn.dataset.linktext || '');
+        $('#as_url').prop('checked', false);
+      }
     } else {
       $('#modalTitle').text('Tambah Lamaran');
       $('#formAction').val('create');
@@ -567,21 +719,43 @@ $statuses = ['dilamar','ditolak','diterima','tidak ada respon','interview','tes 
       const today = new Date().toISOString().slice(0,10);
       $('#applied_date').val(today);
       $('#updated_date').val(today);
+      $('#as_url').prop('checked', false);
     }
   });
 
-  // Charts (data dari PHP)
-  const groupStatus = <?= json_encode($groupStatus, JSON_UNESCAPED_UNICODE) ?>;
-  const groupType   = <?= json_encode($groupType, JSON_UNESCAPED_UNICODE) ?>;
-  const trendLabels = <?= json_encode($trendYM, JSON_UNESCAPED_UNICODE) ?>;
-  const trendData   = <?= json_encode($trendV, JSON_UNESCAPED_UNICODE) ?>;
+  // Sebelum submit: isi hidden source_text/source_link dari mix input
+  $('#jobForm').on('submit', function(e){
+    const company = $('#company_name').val().trim();
+    const title = $('#job_title').val().trim();
+    if (!company || !title) {
+      e.preventDefault();
+      return Swal.fire({icon:'error', title:'Data belum lengkap', text:'Isi minimal Nama Perusahaan & Judul Pekerjaan.'});
+    }
+    const mix = $('#source_mix').val().trim();
+    const asUrl = $('#as_url').is(':checked');
+    if (asUrl && mix && !/^https?:\/\//i.test(mix)) {
+      // simple guard
+      e.preventDefault();
+      return Swal.fire({icon:'error', title:'URL tidak valid', text:'Jika memilih “Tautkan sebagai URL”, isi harus diawali http(s)://'});
+    }
+    $('#source_text').val(mix || '');
+    $('#source_link').val(asUrl ? mix : '');
+  });
 
-  // Status Bar
+  // ===== Charts (data dari PHP) =====
+  const statusesList   = <?= json_encode($statuses_list, JSON_UNESCAPED_UNICODE) ?>;
+  const groupStatus    = <?= json_encode($groupStatus, JSON_UNESCAPED_UNICODE) ?>;
+  const groupType      = <?= json_encode($groupType, JSON_UNESCAPED_UNICODE) ?>;
+  const trendLabels    = <?= json_encode($trendYM, JSON_UNESCAPED_UNICODE) ?>;
+  const trendData      = <?= json_encode($trendV, JSON_UNESCAPED_UNICODE) ?>;
+  const avgSalaryBySt  = <?= json_encode($avg_salary_status, JSON_UNESCAPED_UNICODE) ?>;
+
+  // Status Bar (lengkap & urut)
   new Chart(document.getElementById('chartStatus'), {
     type: 'bar',
     data: {
-      labels: Object.keys(groupStatus),
-      datasets: [{ label: 'Jumlah', data: Object.values(groupStatus) }]
+      labels: statusesList.map(s=>s),
+      datasets: [{ label: 'Jumlah', data: statusesList.map(s => groupStatus[s] || 0) }]
     },
     options: {
       responsive:true,
@@ -606,6 +780,29 @@ $statuses = ['dilamar','ditolak','diterima','tidak ada respon','interview','tes 
     type: 'line',
     data: { labels: trendLabels, datasets: [{ label:'Lamaran', data: trendData, tension:.25 }] },
     options: { responsive:true, maintainAspectRatio:false, plugins:{ legend:{ display:false } }, scales:{ y:{ beginAtZero:true, ticks:{ precision:0 } } } }
+  });
+
+  // Avg Salary per Status (Bar)
+  new Chart(document.getElementById('chartSalaryStatus'), {
+    type: 'bar',
+    data: {
+      labels: statusesList,
+      datasets: [{
+        label: 'Rata-rata Gaji (IDR)',
+        data: statusesList.map(s => avgSalaryBySt[s] ?? null)
+      }]
+    },
+    options: {
+      responsive:true,
+      maintainAspectRatio:false,
+      plugins:{ legend:{ display:false }, tooltip:{ callbacks:{ label:(ctx)=> {
+        const v = ctx.parsed.y; if (v==null) return 'N/A';
+        // format pendek ribuan
+        const fmt = new Intl.NumberFormat('id-ID');
+        return 'Rp ' + fmt.format(Math.round(v));
+      }}}},
+      scales:{ y:{ beginAtZero:true } }
+    }
   });
 
 })();
