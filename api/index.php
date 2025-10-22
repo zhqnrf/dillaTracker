@@ -1,34 +1,38 @@
 <?php
 /******************************************************
  * Job Application Tracker (Turso HTTP, single-file)
- * Deploy-friendly on Vercel (serverless PHP), data PERSIST via Turso.
- * Docs: /v2/pipeline + Bearer token (libSQL Remote Protocol).
+ * Charts + CRUD + DataTables + SweetAlert2
+ * 
+ * Deploy on Vercel using vercel-php runtime.
+ * Requires ENV: TURSO_URL (HTTP + /v2/pipeline), TURSO_TOKEN
  ******************************************************/
 
 date_default_timezone_set('Asia/Jakarta');
 
-// ==== ENV (set di Vercel: TURSO_URL & TURSO_TOKEN) ====
+// ==== ENV ====
 $TURSO_URL   = getenv('TURSO_URL') ?: '';
 $TURSO_TOKEN = getenv('TURSO_TOKEN') ?: '';
 
-// Normalizer: terima libsql:// lalu ubah ke https://.../v2/pipeline
+// Normalizer: terima libsql:// dan ubah ke HTTPS pipeline
 if ($TURSO_URL) {
   if (strpos($TURSO_URL, 'libsql://') === 0) {
-    // libsql://host[:port][?params] -> https://host/v2/pipeline (params diabaikan)
     $u = preg_replace('#^libsql://#','https://',$TURSO_URL);
-    $u = preg_replace('#/+$#','',$u);
+    $u = rtrim($u, '/');
     if (!preg_match('#/v2/pipeline$#',$u)) $u .= '/v2/pipeline';
     $TURSO_URL = $u;
   } elseif (strpos($TURSO_URL, 'http') === 0) {
-    // pastikan ada /v2/pipeline
     $TURSO_URL = rtrim($TURSO_URL, '/');
     if (!preg_match('#/v2/pipeline$#',$TURSO_URL)) $TURSO_URL .= '/v2/pipeline';
   }
 }
+if (!$TURSO_URL || !$TURSO_TOKEN) {
+  http_response_code(500);
+  echo "<h3>Missing ENV</h3><p>Set <b>TURSO_URL</b> (HTTP + <code>/v2/pipeline</code>) & <b>TURSO_TOKEN</b> di Vercel.</p>";
+  exit;
+}
 
-/* ========== TURSO HTTP CLIENT (Hrana over HTTP) ========== */
+/* ========= Turso HTTP client (Hrana over HTTP) ========= */
 function turso_args($params) {
-  // Convert simple PHP scalars → hrana typed values (as strings)
   $out = [];
   foreach ($params as $p) {
     if (is_null($p))        $out[] = ['type'=>'null',   'value'=>'null'];
@@ -38,7 +42,6 @@ function turso_args($params) {
   }
   return $out;
 }
-
 function turso_exec($sql, $params = []) {
   global $TURSO_URL, $TURSO_TOKEN;
   $payload = [
@@ -52,7 +55,6 @@ function turso_exec($sql, $params = []) {
       ["type" => "close"]
     ]
   ];
-
   $ch = curl_init($TURSO_URL);
   curl_setopt_array($ch, [
     CURLOPT_RETURNTRANSFER => true,
@@ -82,24 +84,18 @@ function turso_exec($sql, $params = []) {
   $result = $resp['result'] ?? [];
   $cols   = [];
   foreach (($result['cols'] ?? []) as $c) {
-    // cols could be array of objects with "name"
     $cols[] = is_array($c) && isset($c['name']) ? $c['name'] : $c;
   }
   $rowsOut = [];
   foreach (($result['rows'] ?? []) as $row) {
     $assoc = [];
     foreach ($row as $i => $cell) {
-      // cell usually { type, value } or { base64 }
       if (is_array($cell)) {
-        if (array_key_exists('value', $cell)) {
-          $v = $cell['value'];
-        } elseif (array_key_exists('base64', $cell)) {
-          $v = base64_decode($cell['base64']);
-        } else {
-          $v = null;
-        }
+        if (array_key_exists('value', $cell))      $v = $cell['value'];
+        elseif (array_key_exists('base64', $cell)) $v = base64_decode($cell['base64']);
+        else                                        $v = null;
       } else {
-        $v = $cell; // fallback
+        $v = $cell;
       }
       $assoc[ $cols[$i] ?? $i ] = $v;
     }
@@ -113,7 +109,7 @@ function turso_exec($sql, $params = []) {
   ];
 }
 
-/* ========== SCHEMA BOOTSTRAP ========== */
+/* ========= Schema bootstrap & migrations ========= */
 try {
   turso_exec("CREATE TABLE IF NOT EXISTS jobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -124,29 +120,39 @@ try {
     applied_date TEXT,   -- YYYY-MM-DD
     updated_date TEXT,   -- YYYY-MM-DD
     status       TEXT,   -- dilamar, ditolak, diterima, tidak ada respon, interview, tes tulis, psikotes, mini project
-    source_link  TEXT,
+    salary       TEXT,   -- gaji (bebas: angka atau rentang)
+    source_link  TEXT,   -- URL
+    source_text  TEXT,   -- teks tampilan link
     created_at   TEXT,
     updated_at   TEXT
   )");
+  // Tambah kolom jika tabel lama (safe migrations)
+  $colsRes = turso_exec("PRAGMA table_info(jobs)");
+  $have = [];
+  foreach ($colsRes['rows'] as $c) { $have[] = $c['name']; }
+  $adds = [];
+  if (!in_array('salary',$have))      $adds[] = "ALTER TABLE jobs ADD COLUMN salary TEXT";
+  if (!in_array('source_text',$have)) $adds[] = "ALTER TABLE jobs ADD COLUMN source_text TEXT";
+  foreach ($adds as $q) { try { turso_exec($q); } catch(Exception $e){} }
 } catch (Exception $e) {
   http_response_code(500);
   echo "<h3>Init DB Error</h3><pre>".htmlspecialchars($e->getMessage())."</pre>";
   exit;
 }
 
-/* ========== HELPERS ========== */
+/* ========= Helpers ========= */
 function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
 function today(){ return date('Y-m-d'); }
 
-/* ========== POST HANDLERS ========== */
+/* ========= POST handlers ========= */
 $flash = null;
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   $action = $_POST['action'] ?? '';
   try {
     if ($action === 'create') {
       turso_exec(
-        "INSERT INTO jobs (company_name, job_title, location, job_type, applied_date, updated_date, status, source_link, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO jobs (company_name, job_title, location, job_type, applied_date, updated_date, status, salary, source_link, source_text, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
           trim($_POST['company_name'] ?? ''),
           trim($_POST['job_title'] ?? ''),
@@ -155,7 +161,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
           trim($_POST['applied_date'] ?? ''),
           trim($_POST['updated_date'] ?? ''),
           trim($_POST['status'] ?? ''),
+          trim($_POST['salary'] ?? ''),
           trim($_POST['source_link'] ?? ''),
+          trim($_POST['source_text'] ?? ''),
           date('Y-m-d H:i:s'),
           date('Y-m-d H:i:s')
         ]
@@ -165,7 +173,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } elseif ($action === 'update') {
       $id = (int)($_POST['id'] ?? 0);
       turso_exec(
-        "UPDATE jobs SET company_name=?, job_title=?, location=?, job_type=?, applied_date=?, updated_date=?, status=?, source_link=?, updated_at=? WHERE id=?",
+        "UPDATE jobs SET company_name=?, job_title=?, location=?, job_type=?, applied_date=?, updated_date=?, status=?, salary=?, source_link=?, source_text=?, updated_at=? WHERE id=?",
         [
           trim($_POST['company_name'] ?? ''),
           trim($_POST['job_title'] ?? ''),
@@ -174,7 +182,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
           trim($_POST['applied_date'] ?? ''),
           trim($_POST['updated_date'] ?? ''),
           trim($_POST['status'] ?? ''),
+          trim($_POST['salary'] ?? ''),
           trim($_POST['source_link'] ?? ''),
+          trim($_POST['source_text'] ?? ''),
           date('Y-m-d H:i:s'),
           $id
         ]
@@ -194,16 +204,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   exit;
 }
 
-/* ========== READ DATA ========== */
+/* ========= Read data ========= */
 $rows = [];
 try {
-  $res  = turso_exec("SELECT * FROM jobs ORDER BY id DESC");
-  $rows = $res['rows'];
+  $rows = turso_exec("SELECT * FROM jobs ORDER BY id DESC")['rows'];
 } catch (Exception $e) {
   $rows = [];
 }
 
-/* ========== OPTIONS ========== */
+/* ========= Aggregations for cards & charts ========= */
+function kv($rows, $k) {
+  $out=[]; foreach ($rows as $r){ $out[$r[$k] ?? ''] = (int)($r['cnt'] ?? 0); } return $out;
+}
+$stats = [
+  'total'     => turso_exec("SELECT COUNT(*) AS n FROM jobs")['rows'][0]['n'] ?? 0,
+  'diterima'  => turso_exec("SELECT COUNT(*) AS n FROM jobs WHERE status='diterima'")['rows'][0]['n'] ?? 0,
+  'ditolak'   => turso_exec("SELECT COUNT(*) AS n FROM jobs WHERE status='ditolak'")['rows'][0]['n'] ?? 0,
+  'interview' => turso_exec("SELECT COUNT(*) AS n FROM jobs WHERE status='interview'")['rows'][0]['n'] ?? 0,
+];
+$groupStatus = kv(turso_exec("SELECT COALESCE(status,'') AS grp, COUNT(*) AS cnt FROM jobs GROUP BY grp")['rows'], 'grp');
+$groupType   = kv(turso_exec("SELECT COALESCE(job_type,'') AS grp, COUNT(*) AS cnt FROM jobs GROUP BY grp")['rows'], 'grp');
+$trendRows   = turso_exec("SELECT substr(applied_date,1,7) AS ym, COUNT(*) AS cnt FROM jobs WHERE applied_date IS NOT NULL AND applied_date!='' GROUP BY ym ORDER BY ym")['rows'];
+$trendYM=[]; $trendV=[];
+foreach ($trendRows as $t){ if(!empty($t['ym'])){ $trendYM[]=$t['ym']; $trendV[]=(int)$t['cnt']; } }
+
+/* ========= Options ========= */
 $types    = ['kontrak','fulltime','freelance','remote','hybrid','part time'];
 $statuses = ['dilamar','ditolak','diterima','tidak ada respon','interview','tes tulis','psikotes','mini project'];
 
@@ -223,6 +248,8 @@ $statuses = ['dilamar','ditolak','diterima','tidak ada respon','interview','tes 
 <link rel="stylesheet" href="https://cdn.datatables.net/v/bs5/dt-2.0.7/r-3.0.2/datatables.min.css">
 <!-- SweetAlert2 -->
 <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+<!-- Chart.js -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 
 <style>
 :root{
@@ -231,7 +258,6 @@ $statuses = ['dilamar','ditolak','diterima','tidak ada respon','interview','tes 
   --card-bg: rgba(255,255,255,.86);
   --card-bd: rgba(255,255,255,.55);
 }
-
 .hero { background: linear-gradient(120deg, var(--grad-1), var(--grad-2)); color:#fff; padding:28px 0 90px; }
 .card-glass{ margin-top:-60px; background:var(--card-bg); border:1px solid var(--card-bd); border-radius:20px; box-shadow:0 20px 60px rgba(0,0,0,.12); }
 .btn-add{ --bs-btn-padding-y:.35rem; --bs-btn-padding-x:.65rem; --bs-btn-font-size:.9rem; }
@@ -247,6 +273,7 @@ $statuses = ['dilamar','ditolak','diterima','tidak ada respon','interview','tes 
 .badge-status.psikotes{ background:#e6fffb; color:#0aa; }
 .badge-status.mini\ project{ background:#e8f5e9; color:#2e7d32; }
 @media (max-width: 576px){ .table td{ font-size:.92rem; } }
+.small-mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size:.9rem; }
 </style>
 </head>
 <body>
@@ -267,6 +294,67 @@ $statuses = ['dilamar','ditolak','diterima','tidak ada respon','interview','tes 
 
 <main class="container">
   <div class="card card-glass p-3 p-sm-4">
+    <!-- KPI Cards -->
+    <div class="row g-3 mb-3">
+      <div class="col-6 col-md-3">
+        <div class="border rounded-3 p-3 bg-white h-100">
+          <div class="text-muted small">Total Lamaran</div>
+          <div class="fs-3 fw-bold"><?= (int)$stats['total'] ?></div>
+        </div>
+      </div>
+      <div class="col-6 col-md-3">
+        <div class="border rounded-3 p-3 bg-white h-100">
+          <div class="text-muted small">Diterima</div>
+          <div class="fs-3 fw-bold text-success"><?= (int)$stats['diterima'] ?></div>
+        </div>
+      </div>
+      <div class="col-6 col-md-3">
+        <div class="border rounded-3 p-3 bg-white h-100">
+          <div class="text-muted small">Interview</div>
+          <div class="fs-3 fw-bold text-warning"><?= (int)$stats['interview'] ?></div>
+        </div>
+      </div>
+      <div class="col-6 col-md-3">
+        <div class="border rounded-3 p-3 bg-white h-100">
+          <div class="text-muted small">Ditolak</div>
+          <div class="fs-3 fw-bold text-danger"><?= (int)$stats['ditolak'] ?></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Charts -->
+    <div class="row g-3 mb-4">
+      <div class="col-12 col-lg-6">
+        <div class="border rounded-3 p-3 bg-white">
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <div class="fw-semibold">Distribusi Status</div>
+            <div class="small text-muted">Bar</div>
+          </div>
+          <canvas id="chartStatus" height="170"></canvas>
+        </div>
+      </div>
+      <div class="col-12 col-lg-6">
+        <div class="border rounded-3 p-3 bg-white">
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <div class="fw-semibold">Tipe Pekerjaan</div>
+            <div class="small text-muted">Doughnut</div>
+          </div>
+          <canvas id="chartType" height="170"></canvas>
+        </div>
+      </div>
+      <div class="col-12">
+        <div class="border rounded-3 p-3 bg-white">
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <div class="fw-semibold">Tren Lamaran / Bulan</div>
+            <div class="small text-muted">Line</div>
+          </div>
+          <canvas id="chartTrend" height="100"></canvas>
+          <div class="small text-muted mt-2">Format bulan: <span class="small-mono">YYYY-MM</span> diambil dari “Tanggal Melamar”.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Table -->
     <div class="table-responsive">
       <table id="jobsTable" class="table table-hover align-middle" style="width:100%">
         <thead class="table-light">
@@ -278,6 +366,7 @@ $statuses = ['dilamar','ditolak','diterima','tidak ada respon','interview','tes 
             <th>Tgl Melamar</th>
             <th>Tgl Update</th>
             <th>Status</th>
+            <th>Gaji</th>
             <th>Link/Asal</th>
             <th style="width:90px">Aksi</th>
           </tr>
@@ -295,10 +384,15 @@ $statuses = ['dilamar','ditolak','diterima','tidak ada respon','interview','tes 
               <?php $cls = strtolower((string)($r['status'] ?? '')); ?>
               <span class="badge badge-status <?=str_replace(' ', ' ', $cls)?>"><?=h($r['status'] ?? '')?></span>
             </td>
+            <td><?=h($r['salary'] ?? '')?></td>
             <td>
-              <?php if(!empty($r['source_link'])): ?>
-                <a href="<?=h($r['source_link'])?>" target="_blank" rel="noopener" class="link-primary text-truncate" style="max-width:240px;display:inline-block">
-                  <?=h($r['source_link'])?>
+              <?php
+                $st = $r['source_text'] ?? '';
+                $sl = $r['source_link'] ?? '';
+                if(!empty($sl) || !empty($st)):
+              ?>
+                <a href="<?=h($sl ?: '#')?>" target="_blank" rel="noopener" class="link-primary text-truncate" style="max-width:240px;display:inline-block">
+                  <?=h($st ?: $sl)?>
                 </a>
               <?php endif; ?>
             </td>
@@ -313,7 +407,9 @@ $statuses = ['dilamar','ditolak','diterima','tidak ada respon','interview','tes 
                   data-applied="<?=h($r['applied_date'] ?? '')?>"
                   data-updated="<?=h($r['updated_date'] ?? '')?>"
                   data-status="<?=h($r['status'] ?? '')?>"
+                  data-salary="<?=h($r['salary'] ?? '')?>"
                   data-link="<?=h($r['source_link'] ?? '')?>"
+                  data-linktext="<?=h($r['source_text'] ?? '')?>"
                   data-bs-toggle="modal" data-bs-target="#modalForm"
                   title="Edit">
                   <i class="bi bi-pencil-square"></i>
@@ -374,15 +470,23 @@ $statuses = ['dilamar','ditolak','diterima','tidak ada respon','interview','tes 
             <label class="form-label">Tanggal Update</label>
             <input type="date" name="updated_date" id="updated_date" class="form-control" value="<?=h(today())?>">
           </div>
-          <div class="col-md-12">
+          <div class="col-md-6">
             <label class="form-label">Status Lamaran</label>
             <select name="status" id="status" class="form-select">
               <option value="">— Pilih —</option>
               <?php foreach($statuses as $s): ?><option value="<?=h($s)?>"><?=h(ucwords($s))?></option><?php endforeach; ?>
             </select>
           </div>
-          <div class="col-12">
-            <label class="form-label">Link/Asal Lamaran</label>
+          <div class="col-md-6">
+            <label class="form-label">Gaji</label>
+            <input type="text" name="salary" id="salary" class="form-control" placeholder="cth: 6.000.000 / 6–8 jt / negotiable">
+          </div>
+          <div class="col-md-6">
+            <label class="form-label">Teks Link</label>
+            <input type="text" name="source_text" id="source_text" class="form-control" placeholder="cth: JobStreet / LinkedIn">
+          </div>
+          <div class="col-md-6">
+            <label class="form-label">URL Link</label>
             <input type="url" name="source_link" id="source_link" class="form-control" placeholder="https://...">
           </div>
         </div>
@@ -395,7 +499,7 @@ $statuses = ['dilamar','ditolak','diterima','tidak ada respon','interview','tes 
   </div>
 </div>
 
-<!-- JS -->
+<!-- JS: jQuery + DataTables + Bootstrap -->
 <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
 <script src="https://cdn.datatables.net/v/bs5/dt-2.0.7/r-3.0.2/datatables.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
@@ -422,8 +526,8 @@ $statuses = ['dilamar','ditolak','diterima','tidak ada respon','interview','tes 
     order: [[0, 'asc']],
     language: {
       search: "Cari:",
-      lengthMenu: "Tampil MENU",
-      info: "Menampilkan START–END dari TOTAL data",
+      lengthMenu: "Tampil _MENU_",
+      info: "Menampilkan _START_–_END_ dari _TOTAL_ data",
       infoEmpty: "Tidak ada data",
       zeroRecords: "Tidak ditemukan",
       paginate: { first:"Awal", previous:"Sebelumnya", next:"Berikutnya", last:"Akhir" }
@@ -452,7 +556,9 @@ $statuses = ['dilamar','ditolak','diterima','tidak ada respon','interview','tes 
       $('#applied_date').val(btn.dataset.applied || '');
       $('#updated_date').val(btn.dataset.updated || '');
       $('#status').val(btn.dataset.status);
-      $('#source_link').val(btn.dataset.link);
+      $('#salary').val(btn.dataset.salary || '');
+      $('#source_link').val(btn.dataset.link || '');
+      $('#source_text').val(btn.dataset.linktext || '');
     } else {
       $('#modalTitle').text('Tambah Lamaran');
       $('#formAction').val('create');
@@ -464,15 +570,44 @@ $statuses = ['dilamar','ditolak','diterima','tidak ada respon','interview','tes 
     }
   });
 
-  // Basic validation
-  $('#jobForm').on('submit', function(e){
-    const company = $('#company_name').val().trim();
-    const title = $('#job_title').val().trim();
-    if (!company || !title) {
-      e.preventDefault();
-      Swal.fire({icon:'error', title:'Data belum lengkap', text:'Isi minimal Nama Perusahaan & Judul Pekerjaan.'});
+  // Charts (data dari PHP)
+  const groupStatus = <?= json_encode($groupStatus, JSON_UNESCAPED_UNICODE) ?>;
+  const groupType   = <?= json_encode($groupType, JSON_UNESCAPED_UNICODE) ?>;
+  const trendLabels = <?= json_encode($trendYM, JSON_UNESCAPED_UNICODE) ?>;
+  const trendData   = <?= json_encode($trendV, JSON_UNESCAPED_UNICODE) ?>;
+
+  // Status Bar
+  new Chart(document.getElementById('chartStatus'), {
+    type: 'bar',
+    data: {
+      labels: Object.keys(groupStatus),
+      datasets: [{ label: 'Jumlah', data: Object.values(groupStatus) }]
+    },
+    options: {
+      responsive:true,
+      maintainAspectRatio:false,
+      plugins:{ legend:{ display:false } },
+      scales:{ y:{ beginAtZero:true, ticks:{ precision:0 } } }
     }
   });
+
+  // Type Doughnut
+  new Chart(document.getElementById('chartType'), {
+    type: 'doughnut',
+    data: {
+      labels: Object.keys(groupType),
+      datasets: [{ data: Object.values(groupType) }]
+    },
+    options: { responsive:true, maintainAspectRatio:false, plugins:{ legend:{ position:'bottom' } } }
+  });
+
+  // Trend Line
+  new Chart(document.getElementById('chartTrend'), {
+    type: 'line',
+    data: { labels: trendLabels, datasets: [{ label:'Lamaran', data: trendData, tension:.25 }] },
+    options: { responsive:true, maintainAspectRatio:false, plugins:{ legend:{ display:false } }, scales:{ y:{ beginAtZero:true, ticks:{ precision:0 } } } }
+  });
+
 })();
 </script>
 </body>
