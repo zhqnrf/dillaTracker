@@ -1,10 +1,11 @@
 <?php
 /******************************************************
  * Job Application Tracker (Turso HTTP, single-file)
- * Charts + CRUD + DataTables + SweetAlert2 + Filters
+ * Super-compact UI: tiny charts in one horizontal row
  * 
- * Deploy on Vercel using vercel-php runtime.
- * Requires ENV: TURSO_URL (HTTP + /v2/pipeline), TURSO_TOKEN
+ * ENV required (Vercel):
+ *  - TURSO_URL = https://<db>-<org>.turso.io/v2/pipeline
+ *  - TURSO_TOKEN = <token>
  ******************************************************/
 
 date_default_timezone_set('Asia/Jakarta');
@@ -13,7 +14,7 @@ date_default_timezone_set('Asia/Jakarta');
 $TURSO_URL   = getenv('TURSO_URL') ?: '';
 $TURSO_TOKEN = getenv('TURSO_TOKEN') ?: '';
 
-// Normalizer: terima libsql:// dan ubah ke HTTPS pipeline
+// Normalizer: jika user isi libsql:// → ubah ke https://.../v2/pipeline
 if ($TURSO_URL) {
   if (strpos($TURSO_URL, 'libsql://') === 0) {
     $u = preg_replace('#^libsql://#','https://',$TURSO_URL);
@@ -116,24 +117,22 @@ try {
     company_name TEXT NOT NULL,
     job_title    TEXT NOT NULL,
     location     TEXT,
-    job_type     TEXT,   -- kontrak, fulltime, freelance, remote, hybrid, part time
-    applied_date TEXT,   -- YYYY-MM-DD
-    updated_date TEXT,   -- YYYY-MM-DD
-    status       TEXT,   -- dilamar, ditolak, diterima, tidak ada respon, interview, tes tulis, psikotes, mini project
-    salary       TEXT,   -- gaji (free text, kita parse angka jika memungkinkan)
-    source_link  TEXT,   -- URL (opsional)
-    source_text  TEXT,   -- teks tampilan link (opsional)
+    job_type     TEXT,
+    applied_date TEXT,
+    updated_date TEXT,
+    status       TEXT,
+    salary       TEXT,
+    source_link  TEXT,
+    source_text  TEXT,
     created_at   TEXT,
     updated_at   TEXT
   )");
-  // Tambah kolom jika tabel lama (safe migrations)
   $colsRes = turso_exec("PRAGMA table_info(jobs)");
-  $have = [];
-  foreach ($colsRes['rows'] as $c) { $have[] = $c['name']; }
-  $adds = [];
-  if (!in_array('salary',$have))      $adds[] = "ALTER TABLE jobs ADD COLUMN salary TEXT";
-  if (!in_array('source_text',$have)) $adds[] = "ALTER TABLE jobs ADD COLUMN source_text TEXT";
-  foreach ($adds as $q) { try { turso_exec($q); } catch(Exception $e){} }
+  $have = []; foreach ($colsRes['rows'] as $c) { $have[] = $c['name']; }
+  foreach (['salary'=>'ALTER TABLE jobs ADD COLUMN salary TEXT',
+            'source_text'=>'ALTER TABLE jobs ADD COLUMN source_text TEXT'] as $k=>$q) {
+    if (!in_array($k,$have)) { try { turso_exec($q);} catch(Exception $e){} }
+  }
 } catch (Exception $e) {
   http_response_code(500);
   echo "<h3>Init DB Error</h3><pre>".htmlspecialchars($e->getMessage())."</pre>";
@@ -143,56 +142,36 @@ try {
 /* ========= Helpers ========= */
 function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
 function today(){ return date('Y-m-d'); }
-
-/**
- * Parse salary string → number (IDR) best-effort.
- * Mendukung: "6.000.000", "6jt", "6 juta", "6-8 jt", "6 – 8 juta", "7k", "700rb", "7.5 jt".
- * Return null jika tidak bisa diparse.
- */
+// Parse gaji → angka IDR (best-effort)
 function parse_salary($txt) {
   if (!$txt) return null;
-  $s = mb_strtolower(trim($txt), 'UTF-8');
-  // ganti pemisah ribuan jadi kosong, koma jadi titik desimal jika perlu
-  $s = str_replace(['rp',' ', "\xc2\xa0"], '', $s); // hapus 'rp' & spasi termasuk nbsp
-  // Tangani penanda range: "-", "–", "sampai", "to"
+  $s = mb_strtolower(trim($txt),'UTF-8');
+  $s = str_replace(['rp',' ', "\xc2\xa0"], '', $s);
   $parts = preg_split('#\s*(?:-|–|sampai|to)\s*#u', $s);
   $nums = [];
   foreach ($parts as $p) {
-    $p = trim($p);
-    if ($p==='') continue;
-    // multiplier
+    $p = trim($p); if ($p==='') continue;
     $mult = 1;
-    if (preg_match('#(jt|juta)#u', $p)) $mult = 1000000;
-    elseif (preg_match('#(rb|ribu)#u', $p)) $mult = 1000;
-    elseif (preg_match('#\bk\b#u', $p)) $mult = 1000;
-
-    // ambil angka: 7.500.000 / 7,5 / 7500000
-    if (preg_match('#(\d{1,3}(?:[.\s]\d{3})+|\d+(?:[.,]\d+)?)#u', $p, $m)) {
-      $raw = $m[1];
-      // jika ada titik sebagai ribuan, buang. Jika koma sebagai desimal, ubah ke titik
-      $norm = str_replace('.', '', $raw);
+    if (preg_match('#(jt|juta)#u',$p)) $mult = 1000000;
+    elseif (preg_match('#(rb|ribu|\bk\b)#u',$p)) $mult = 1000;
+    if (preg_match('#(\d{1,3}(?:[.\s]\d{3})+|\d+(?:[.,]\d+)?)#u',$p,$m)) {
+      $norm = str_replace('.', '', $m[1]);
       $norm = str_replace(',', '.', $norm);
       if (is_numeric($norm)) {
         $val = floatval($norm);
-        // jika ada penanda "jt/juta/k/rb/ribu" dan angka kecil (misal 6), kali multiplier
-        if ($mult > 1 && $val < 10000) {
-          $val *= $mult;
-        }
-        // jika tidak ada multiplier tapi angka nampaknya jutaan dg ribuan, biarkan
+        if ($mult>1 && $val<10000) $val *= $mult;
         $nums[] = $val;
       }
     }
   }
   if (!$nums) return null;
-  // jika range → rata-rata
-  $avg = array_sum($nums) / count($nums);
-  return $avg;
+  return array_sum($nums)/count($nums);
 }
 function format_idr_short($n){
-  if ($n === null) return '-';
-  if ($n >= 1000000000) return number_format($n/1000000000, 2).' M';
-  if ($n >= 1000000)    return number_format($n/1000000, 2).' Jt';
-  if ($n >= 1000)       return number_format($n/1000, 2).' Rb';
+  if ($n === null) return '—';
+  if ($n >= 1e9) return number_format($n/1e9, 2).' M';
+  if ($n >= 1e6) return number_format($n/1e6, 2).' Jt';
+  if ($n >= 1e3) return number_format($n/1e3, 2).' Rb';
   return number_format($n,0,',','.');
 }
 
@@ -201,11 +180,9 @@ $flash = null;
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   $action = $_POST['action'] ?? '';
   try {
-    // Visible input "source_mix" + "as_url" → isi ke hidden source_text/source_link
-    $source_mix = trim($_POST['source_mix'] ?? '');
-    $as_url     = isset($_POST['as_url']) && $_POST['as_url']=='1';
-    $source_text = $source_mix ?: '';
-    $source_link = $as_url ? $source_mix : '';
+    // 1 kolom input link/text + checkbox as_url → map ke source_text/source_link
+    $mix = trim($_POST['source_mix'] ?? ''); $as_url = !empty($_POST['as_url']);
+    $source_text = $mix ?: ''; $source_link = $as_url ? $mix : '';
 
     if ($action === 'create') {
       turso_exec(
@@ -226,7 +203,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
           date('Y-m-d H:i:s')
         ]
       );
-      $flash = ['type'=>'success','text'=>'Data lamaran berhasil ditambahkan.'];
+      $flash = ['type'=>'success','text'=>'Data lamaran ditambahkan.'];
 
     } elseif ($action === 'update') {
       $id = (int)($_POST['id'] ?? 0);
@@ -247,35 +224,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
           $id
         ]
       );
-      $flash = ['type'=>'success','text'=>'Data lamaran berhasil diperbarui.'];
+      $flash = ['type'=>'success','text'=>'Data lamaran diperbarui.'];
 
     } elseif ($action === 'delete') {
       $id = (int)($_POST['id'] ?? 0);
       turso_exec("DELETE FROM jobs WHERE id = ?", [$id]);
-      $flash = ['type'=>'success','text'=>'Data lamaran berhasil dihapus.'];
+      $flash = ['type'=>'success','text'=>'Data lamaran dihapus.'];
     }
   } catch (Exception $e) {
-    $flash = ['type'=>'error','text'=>'Gagal memproses data: '.$e->getMessage()];
+    $flash = ['type'=>'error','text'=>'Gagal: '.$e->getMessage()];
   }
-
   header("Location: " . strtok($_SERVER["REQUEST_URI"], '?') . '?flash=' . urlencode(json_encode($flash)));
   exit;
 }
 
-/* ========= Read data ========= */
-$rows = [];
-try {
-  $rows = turso_exec("SELECT * FROM jobs ORDER BY id DESC")['rows'];
-} catch (Exception $e) {
-  $rows = [];
-}
+/* ========= Read data & aggregations ========= */
+$rows = []; try { $rows = turso_exec("SELECT * FROM jobs ORDER BY id DESC")['rows']; } catch (Exception $e) { $rows=[]; }
 
-/* ========= Aggregations for cards & charts ========= */
-function kv($rows, $k) {
-  $out=[]; foreach ($rows as $r){ $out[$r[$k] ?? ''] = (int)($r['cnt'] ?? 0); } return $out;
-}
 $statuses_list = ['dilamar','ditolak','diterima','tidak ada respon','interview','tes tulis','psikotes','mini project'];
 
+function kv($rows, $k){ $o=[]; foreach($rows as $r){ $o[$r[$k] ?? '']=(int)($r['cnt'] ?? 0);} return $o; }
 $stats = [
   'total'     => turso_exec("SELECT COUNT(*) AS n FROM jobs")['rows'][0]['n'] ?? 0,
   'diterima'  => turso_exec("SELECT COUNT(*) AS n FROM jobs WHERE status='diterima'")['rows'][0]['n'] ?? 0,
@@ -283,46 +251,38 @@ $stats = [
   'interview' => turso_exec("SELECT COUNT(*) AS n FROM jobs WHERE status='interview'")['rows'][0]['n'] ?? 0,
 ];
 $groupStatusRaw = kv(turso_exec("SELECT COALESCE(status,'') AS grp, COUNT(*) AS cnt FROM jobs GROUP BY grp")['rows'], 'grp');
-// pastikan urutan label fix
-$groupStatus = [];
-foreach ($statuses_list as $s) { $groupStatus[$s] = (int)($groupStatusRaw[$s] ?? 0); }
-
-$groupType   = kv(turso_exec("SELECT COALESCE(job_type,'') AS grp, COUNT(*) AS cnt FROM jobs GROUP BY grp")['rows'], 'grp');
-$trendRows   = turso_exec("SELECT substr(applied_date,1,7) AS ym, COUNT(*) AS cnt FROM jobs WHERE applied_date IS NOT NULL AND applied_date!='' GROUP BY ym ORDER BY ym")['rows'];
-$trendYM=[]; $trendV=[];
-foreach ($trendRows as $t){ if(!empty($t['ym'])){ $trendYM[]=$t['ym']; $trendV[]=(int)$t['cnt']; } }
+$groupStatus = []; foreach($statuses_list as $s){ $groupStatus[$s]=(int)($groupStatusRaw[$s] ?? 0); }
+$groupType = kv(turso_exec("SELECT COALESCE(job_type,'') AS grp, COUNT(*) AS cnt FROM jobs GROUP BY grp")['rows'], 'grp');
+$trendRows = turso_exec("SELECT substr(applied_date,1,7) AS ym, COUNT(*) AS cnt FROM jobs WHERE applied_date IS NOT NULL AND applied_date!='' GROUP BY ym ORDER BY ym")['rows'];
+$trendYM=[]; $trendV=[]; foreach($trendRows as $t){ if(!empty($t['ym'])){ $trendYM[]=$t['ym']; $trendV[]=(int)$t['cnt']; } }
 
 // Gaji rata-rata (overall & per status)
-$all_salaries = [];
-$salary_by_status = [];
+$all_salaries = []; $salary_by_status = [];
 foreach ($rows as $r){
   $val = parse_salary($r['salary'] ?? '');
   if ($val !== null) {
     $all_salaries[] = $val;
     $st = strtolower($r['status'] ?? '');
-    if (!isset($salary_by_status[$st])) $salary_by_status[$st] = [];
     $salary_by_status[$st][] = $val;
   }
 }
 $avg_salary_overall = $all_salaries ? array_sum($all_salaries)/count($all_salaries) : null;
-$avg_salary_status = [];
-foreach ($statuses_list as $st){
-  if (!empty($salary_by_status[$st])) {
-    $avg_salary_status[$st] = array_sum($salary_by_status[$st])/count($salary_by_status[$st]);
-  } else {
-    $avg_salary_status[$st] = null;
-  }
-}
+$avg_salary_status = []; foreach ($statuses_list as $st){ $avg_salary_status[$st] = !empty($salary_by_status[$st]) ? array_sum($salary_by_status[$st])/count($salary_by_status[$st]) : null; }
 
-/* ========= Options ========= */
-$types    = ['kontrak','fulltime','freelance','remote','hybrid','part time'];
+$types = ['kontrak','fulltime','freelance','remote','hybrid','part time'];
 ?>
 <!doctype html>
 <html lang="id">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Tracker Lamaran Kerja</title>
+<title>Track Dilla Job</title>
+
+<!-- Logo / Favicon -->
+<link rel="icon" type="image/svg+xml" href="https://cdn.jsdelivr.net/npm/tabler-icons@latest/icons/briefcase.svg">
+<link rel="alternate icon" type="image/png" href="https://cdn.jsdelivr.net/gh/twitter/twemoji@latest/assets/72x72/1f4bc.png" sizes="72x72">
+<link rel="icon" type="image/svg+xml" href="https://cdn.jsdelivr.net/npm/tabler-icons@latest/icons/briefcase.svg">
+<link rel="alternate icon" type="image/png" href="https://cdn.jsdelivr.net/gh/twitter/twemoji@latest/assets/72x72/1f4bc.png" sizes="72x72">
 
 <!-- Bootstrap 5 -->
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
@@ -337,16 +297,13 @@ $types    = ['kontrak','fulltime','freelance','remote','hybrid','part time'];
 
 <style>
 :root{
-  --grad-1:#5b86e5;
-  --grad-2:#36d1dc;
-  --card-bg: rgba(255,255,255,.86);
-  --card-bd: rgba(255,255,255,.55);
+  --grad-1:#5b86e5; --grad-2:#36d1dc;
+  --card-bg: rgba(255,255,255,.9); --card-bd: rgba(255,255,255,.6);
 }
-.hero { background: linear-gradient(120deg, var(--grad-1), var(--grad-2)); color:#fff; padding:28px 0 90px; }
-.card-glass{ margin-top:-60px; background:var(--card-bg); border:1px solid var(--card-bd); border-radius:20px; box-shadow:0 20px 60px rgba(0,0,0,.12); }
-.btn-add{ --bs-btn-padding-y:.35rem; --bs-btn-padding-x:.65rem; --bs-btn-font-size:.9rem; }
+.hero { background: linear-gradient(120deg, var(--grad-1), var(--grad-2)); color:#fff; padding:18px 0 48px; }
+.card-glass{ margin-top:-40px; background:var(--card-bg); border:1px solid var(--card-bd); border-radius:16px; box-shadow:0 14px 40px rgba(0,0,0,.10); }
+.btn-add{ --bs-btn-padding-y:.3rem; --bs-btn-padding-x:.6rem; --bs-btn-font-size:.9rem; }
 .table thead th{ white-space:nowrap; }
-.dt-container .row:nth-child(1) > div{ margin-bottom:.5rem; }
 .badge-status{ font-weight:600; letter-spacing:.2px; }
 .badge-status.dilamar{ background:#e7f1ff; color:#0d6efd; }
 .badge-status.ditolak{ background:#fde8e8; color:#c1121f; }
@@ -357,18 +314,32 @@ $types    = ['kontrak','fulltime','freelance','remote','hybrid','part time'];
 .badge-status.psikotes{ background:#e6fffb; color:#0aa; }
 .badge-status.mini\ project{ background:#e8f5e9; color:#2e7d32; }
 .badge-salary{ background:#eef9ff; color:#0b6aa6; font-weight:600; }
-@media (max-width: 576px){ .table td{ font-size:.92rem; } }
-.small-mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size:.9rem; }
+
+.kpi .box{ background:#fff; border:1px solid rgba(0,0,0,.06); border-radius:12px; padding:10px 12px; }
+.kpi .title{ font-size:.82rem; color:#6b7280; }
+.kpi .value{ font-size:1.25rem; font-weight:800; line-height:1.1; }
+
+.mini-charts{ display:flex; gap:8px; overflow-x:auto; padding:6px 2px 2px; -webkit-overflow-scrolling:touch; scrollbar-width:thin; }
+.mini-chart-card{ flex:0 0 auto; width:220px; max-width:70vw; background:#fff; border:1px solid rgba(0,0,0,.06); border-radius:12px; padding:8px; }
+.mini-chart-title{ font-size:.85rem; font-weight:600; color:#111; margin-bottom:4px; display:flex; justify-content:space-between; }
+.mini-chart-note{ font-size:.72rem; color:#6b7280; }
+.mini-canvas-wrap{ height:90px; } /* tinggi chart kecil */
+
+@media (max-width:576px){
+  .kpi .value{ font-size:1.1rem; }
+  .mini-chart-card{ width:190px; }
+  .mini-canvas-wrap{ height:90px; }
+}
 </style>
 </head>
 <body>
 
 <header class="hero">
   <div class="container">
-    <div class="d-flex align-items-center justify-content-between">
+    <div class="d-flex align-items-center justify-content-between flex-wrap gap-2">
       <div>
-        <h1 class="h3 mb-1">Tracker Lamaran Kerja</h1>
-        <div class="opacity-75">Pantau semua proses rekrutmen di satu tempat</div>
+        <h1 class="h5 mb-0">Track Lamaran Sayangku</h1>
+        <div class="opacity-75 small">Bismillah dan Barokah</div>
       </div>
       <div class="d-flex align-items-center gap-2">
         <!-- Filters -->
@@ -384,7 +355,6 @@ $types    = ['kontrak','fulltime','freelance','remote','hybrid','part time'];
           <option value="<?=h($t)?>"><?=h(ucfirst($t))?></option>
           <?php endforeach; ?>
         </select>
-
         <button class="btn btn-light btn-add shadow-sm" data-bs-toggle="modal" data-bs-target="#modalForm">
           <i class="bi bi-plus-lg me-1"></i> Tambah
         </button>
@@ -394,82 +364,36 @@ $types    = ['kontrak','fulltime','freelance','remote','hybrid','part time'];
 </header>
 
 <main class="container">
-  <div class="card card-glass p-3 p-sm-4">
-    <!-- KPI Cards -->
-    <div class="row g-3 mb-3">
-      <div class="col-6 col-md-3">
-        <div class="border rounded-3 p-3 bg-white h-100">
-          <div class="text-muted small">Jumlah Dikirim (Total)</div>
-          <div class="fs-3 fw-bold"><?= (int)$stats['total'] ?></div>
-        </div>
-      </div>
-      <div class="col-6 col-md-2">
-        <div class="border rounded-3 p-3 bg-white h-100">
-          <div class="text-muted small">Diterima</div>
-          <div class="fs-3 fw-bold text-success"><?= (int)$stats['diterima'] ?></div>
-        </div>
-      </div>
-      <div class="col-6 col-md-2">
-        <div class="border rounded-3 p-3 bg-white h-100">
-          <div class="text-muted small">Interview</div>
-          <div class="fs-3 fw-bold text-warning"><?= (int)$stats['interview'] ?></div>
-        </div>
-      </div>
-      <div class="col-6 col-md-2">
-        <div class="border rounded-3 p-3 bg-white h-100">
-          <div class="text-muted small">Ditolak</div>
-          <div class="fs-3 fw-bold text-danger"><?= (int)$stats['ditolak'] ?></div>
-        </div>
-      </div>
-      <div class="col-12 col-md-3">
-        <div class="border rounded-3 p-3 bg-white h-100">
-          <div class="text-muted small">Rata-rata Gaji (parsable)</div>
-          <div class="fs-5 fw-bold"><?= $avg_salary_overall !== null ? 'Rp '.format_idr_short($avg_salary_overall) : '—' ?></div>
-          <div class="small text-muted">Input bebas (cth: 6–8 jt); hanya nilai yang bisa diparse dihitung.</div>
-        </div>
-      </div>
+  <div class="card card-glass p-3 p-sm-3">
+
+    <!-- KPI compact -->
+    <div class="kpi row g-2 mb-2">
+      <div class="col-6 col-md-3"><div class="box"><div class="title">Dikirim (Total)</div><div class="value"><?= (int)$stats['total'] ?></div></div></div>
+      <div class="col-6 col-md-3"><div class="box"><div class="title">Diterima</div><div class="value text-success"><?= (int)$stats['diterima'] ?></div></div></div>
+      <div class="col-6 col-md-3"><div class="box"><div class="title">Interview</div><div class="value text-warning"><?= (int)$stats['interview'] ?></div></div></div>
+      <div class="col-6 col-md-3"><div class="box"><div class="title">Ditolak</div><div class="value text-danger"><?= (int)$stats['ditolak'] ?></div></div></div>
+      <div class="col-12 col-md-3"><div class="box"><div class="title">Avg Gaji (parsable)</div><div class="value">Rp <?= format_idr_short($avg_salary_overall) ?></div></div></div>
     </div>
 
-    <!-- Charts -->
-    <!-- <div class="row g-3 mb-4">
-      <div class="col-12 col-lg-6">
-        <div class="border rounded-3 p-3 bg-white">
-          <div class="d-flex justify-content-between align-items-center mb-2">
-            <div class="fw-semibold">Status Lamaran (lengkap)</div>
-            <div class="small text-muted">Bar</div>
-          </div>
-          <canvas id="chartStatus" height="170"></canvas>
-        </div>
+    <!-- MINI CHARTS: one horizontal line, tiny -->
+    <div class="mini-charts mb-3">
+      <div class="mini-chart-card">
+        <div class="mini-chart-title">Status <span class="mini-chart-note">Bar</span></div>
+        <div class="mini-canvas-wrap"><canvas id="chartStatus"></canvas></div>
       </div>
-      <div class="col-12 col-lg-6">
-        <div class="border rounded-3 p-3 bg-white">
-          <div class="d-flex justify-content-between align-items-center mb-2">
-            <div class="fw-semibold">Tipe Pekerjaan</div>
-            <div class="small text-muted">Doughnut</div>
-          </div>
-          <canvas id="chartType" height="170"></canvas>
-        </div>
+      <div class="mini-chart-card">
+        <div class="mini-chart-title">Tipe Pekerjaan <span class="mini-chart-note">Doughnut</span></div>
+        <div class="mini-canvas-wrap"><canvas id="chartType"></canvas></div>
       </div>
-      <div class="col-12">
-        <div class="border rounded-3 p-3 bg-white">
-          <div class="d-flex justify-content-between align-items-center mb-2">
-            <div class="fw-semibold">Tren Lamaran / Bulan</div>
-            <div class="small text-muted">Line</div>
-          </div>
-          <canvas id="chartTrend" height="100"></canvas>
-          <div class="small text-muted mt-2">Format bulan: <span class="small-mono">YYYY-MM</span> diambil dari “Tanggal Melamar”.</div>
-        </div>
+      <div class="mini-chart-card">
+        <div class="mini-chart-title">Tren / Bulan <span class="mini-chart-note">Line</span></div>
+        <div class="mini-canvas-wrap"><canvas id="chartTrend"></canvas></div>
       </div>
-      <div class="col-12">
-        <div class="border rounded-3 p-3 bg-white">
-          <div class="d-flex justify-content-between align-items-center mb-2">
-            <div class="fw-semibold">Rata-rata Gaji per Status</div>
-            <div class="small text-muted">Bar</div>
-          </div>
-          <canvas id="chartSalaryStatus" height="120"></canvas>
-        </div>
+      <div class="mini-chart-card">
+        <div class="mini-chart-title">Avg Gaji / Status <span class="mini-chart-note">Bar</span></div>
+        <div class="mini-canvas-wrap"><canvas id="chartSalaryStatus"></canvas></div>
       </div>
-    </div> -->
+    </div>
 
     <!-- Table -->
     <div class="table-responsive">
@@ -560,9 +484,6 @@ $types    = ['kontrak','fulltime','freelance','remote','hybrid','part time'];
       <div class="modal-body">
         <input type="hidden" name="action" id="formAction" value="create">
         <input type="hidden" name="id" id="formId" value="">
-        <!-- hidden yang diisi otomatis -->
-        <input type="hidden" name="source_text" id="source_text">
-        <input type="hidden" name="source_link" id="source_link">
         <div class="row g-3">
           <div class="col-12">
             <label class="form-label">Nama Perusahaan <span class="text-danger">*</span></label>
@@ -602,7 +523,6 @@ $types    = ['kontrak','fulltime','freelance','remote','hybrid','part time'];
             <label class="form-label">Gaji</label>
             <input type="text" name="salary" id="salary" class="form-control" placeholder="cth: 6.000.000 / 6–8 jt / negotiable">
           </div>
-
           <div class="col-12">
             <label class="form-label">Link/Asal (isi teks atau URL)</label>
             <div class="input-group">
@@ -610,9 +530,9 @@ $types    = ['kontrak','fulltime','freelance','remote','hybrid','part time'];
               <span class="input-group-text">
                 <input class="form-check-input mt-0" type="checkbox" id="as_url" name="as_url" value="1" aria-label="Tautkan sebagai URL">
               </span>
-              <span class="input-group-text small">Tautkan sebagai URL</span>
+              <span class="input-group-text small">Tautkan</span>
             </div>
-            <div class="form-text">Centang jika ingin diperlakukan sebagai tautan. Kalau tidak, disimpan sebagai teks saja.</div>
+            <div class="form-text">Centang jika ingin dijadikan tautan (URL). Jika tidak, disimpan sebagai teks.</div>
           </div>
         </div>
       </div>
@@ -637,10 +557,9 @@ $types    = ['kontrak','fulltime','freelance','remote','hybrid','part time'];
     try {
       const data = JSON.parse(decodeURIComponent(urlParams.get('flash')));
       if (data && data.text) {
-        Swal.fire({ icon: data.type==='success'?'success':'error', title: data.type==='success'?'Berhasil':'Gagal', text: data.text, timer:1800, showConfirmButton:false });
+        Swal.fire({ icon: data.type==='success'?'success':'error', title: data.type==='success'?'Berhasil':'Gagal', text: data.text, timer:1500, showConfirmButton:false });
       }
-      const clean = location.protocol + '//' + location.host + location.pathname;
-      history.replaceState({}, document.title, clean);
+      history.replaceState({}, document.title, location.pathname);
     } catch(e){}
   }
 
@@ -660,31 +579,21 @@ $types    = ['kontrak','fulltime','freelance','remote','hybrid','part time'];
   });
 
   // Filters: Status (col 6), Type (col 3)
-  const statusColIdx = 6;
-  const typeColIdx   = 3;
-
+  const statusColIdx = 6, typeColIdx = 3;
   $('#filterStatus').on('change', function(){
-    const val = this.value;
-    if (!val) {
-      dt.column(statusColIdx).search('').draw();
-    } else {
-      dt.column(statusColIdx).search('^'+val+'$', true, false).draw(); // exact match
-    }
+    const v = this.value;
+    dt.column(statusColIdx).search(v ? '^'+v+'$' : '', true, false).draw();
   });
   $('#filterType').on('change', function(){
-    const val = this.value;
-    if (!val) {
-      dt.column(typeColIdx).search('').draw();
-    } else {
-      dt.column(typeColIdx).search(val, true, false).draw();
-    }
+    const v = this.value;
+    dt.column(typeColIdx).search(v || '', true, false).draw();
   });
 
   // Delete confirm
   $(document).on('click','.btn-delete', function(){
     const $form = $(this).closest('form');
     Swal.fire({ icon:'warning', title:'Hapus data?', text:'Tindakan ini tidak bisa dibatalkan.', showCancelButton:true, confirmButtonText:'Ya, hapus', cancelButtonText:'Batal' })
-    .then((res)=>{ if(res.isConfirmed){ $form.trigger('submit'); }});
+      .then((res)=>{ if(res.isConfirmed){ $form.trigger('submit'); }});
   });
 
   // Modal add/edit
@@ -703,46 +612,31 @@ $types    = ['kontrak','fulltime','freelance','remote','hybrid','part time'];
       $('#updated_date').val(btn.dataset.updated || '');
       $('#status').val(btn.dataset.status);
       $('#salary').val(btn.dataset.salary || '');
-      // mix input: jika ada link → isi source_mix=link & centang; kalau tidak → pakai text
-      if (btn.dataset.link) {
-        $('#source_mix').val(btn.dataset.link);
-        $('#as_url').prop('checked', true);
-      } else {
-        $('#source_mix').val(btn.dataset.linktext || '');
-        $('#as_url').prop('checked', false);
-      }
+      if (btn.dataset.link) { $('#source_mix').val(btn.dataset.link); $('#as_url').prop('checked', true); }
+      else { $('#source_mix').val(btn.dataset.linktext || ''); $('#as_url').prop('checked', false); }
     } else {
       $('#modalTitle').text('Tambah Lamaran');
       $('#formAction').val('create');
       $('#formId').val('');
       $('#jobForm')[0].reset();
       const today = new Date().toISOString().slice(0,10);
-      $('#applied_date').val(today);
-      $('#updated_date').val(today);
-      $('#as_url').prop('checked', false);
+      $('#applied_date').val(today); $('#updated_date').val(today); $('#as_url').prop('checked', false);
     }
   });
 
-  // Sebelum submit: isi hidden source_text/source_link dari mix input
+  // Before submit: map source_mix → hidden text/link
   $('#jobForm').on('submit', function(e){
     const company = $('#company_name').val().trim();
     const title = $('#job_title').val().trim();
-    if (!company || !title) {
-      e.preventDefault();
-      return Swal.fire({icon:'error', title:'Data belum lengkap', text:'Isi minimal Nama Perusahaan & Judul Pekerjaan.'});
-    }
+    if (!company || !title) { e.preventDefault(); return Swal.fire({icon:'error', title:'Data belum lengkap', text:'Isi minimal Nama Perusahaan & Judul Pekerjaan.'}); }
     const mix = $('#source_mix').val().trim();
     const asUrl = $('#as_url').is(':checked');
-    if (asUrl && mix && !/^https?:\/\//i.test(mix)) {
-      // simple guard
-      e.preventDefault();
-      return Swal.fire({icon:'error', title:'URL tidak valid', text:'Jika memilih “Tautkan sebagai URL”, isi harus diawali http(s)://'});
-    }
-    $('#source_text').val(mix || '');
-    $('#source_link').val(asUrl ? mix : '');
+    if (asUrl && mix && !/^https?:\/\//i.test(mix)) { e.preventDefault(); return Swal.fire({icon:'error', title:'URL tidak valid', text:'Jika “Tautkan” dicentang, isi harus diawali http(s)://'}); }
+    $('<input type="hidden" name="source_text">').val(mix || '').appendTo('#jobForm');
+    $('<input type="hidden" name="source_link">').val(asUrl ? mix : '').appendTo('#jobForm');
   });
 
-  // ===== Charts (data dari PHP) =====
+  // ===== Charts (tiny) =====
   const statusesList   = <?= json_encode($statuses_list, JSON_UNESCAPED_UNICODE) ?>;
   const groupStatus    = <?= json_encode($groupStatus, JSON_UNESCAPED_UNICODE) ?>;
   const groupType      = <?= json_encode($groupType, JSON_UNESCAPED_UNICODE) ?>;
@@ -750,61 +644,36 @@ $types    = ['kontrak','fulltime','freelance','remote','hybrid','part time'];
   const trendData      = <?= json_encode($trendV, JSON_UNESCAPED_UNICODE) ?>;
   const avgSalaryBySt  = <?= json_encode($avg_salary_status, JSON_UNESCAPED_UNICODE) ?>;
 
-  // Status Bar (lengkap & urut)
+  // helper default tiny options
+  const tinyOpts = (withLegend=false)=>({
+    responsive:true, maintainAspectRatio:false,
+    plugins:{ legend:{ display:withLegend }, tooltip:{ enabled:true } },
+    scales:{ y:{ beginAtZero:true, ticks:{ precision:0, maxTicksLimit:3 } }, x:{ ticks:{ maxRotation:0, autoSkip:true } } }
+  });
+
   new Chart(document.getElementById('chartStatus'), {
     type: 'bar',
-    data: {
-      labels: statusesList.map(s=>s),
-      datasets: [{ label: 'Jumlah', data: statusesList.map(s => groupStatus[s] || 0) }]
-    },
-    options: {
-      responsive:true,
-      maintainAspectRatio:false,
-      plugins:{ legend:{ display:false } },
-      scales:{ y:{ beginAtZero:true, ticks:{ precision:0 } } }
-    }
+    data: { labels: statusesList, datasets: [{ label:'Jumlah', data: statusesList.map(s => groupStatus[s]||0) }] },
+    options: tinyOpts(false)
   });
 
-  // Type Doughnut
   new Chart(document.getElementById('chartType'), {
     type: 'doughnut',
-    data: {
-      labels: Object.keys(groupType),
-      datasets: [{ data: Object.values(groupType) }]
-    },
-    options: { responsive:true, maintainAspectRatio:false, plugins:{ legend:{ position:'bottom' } } }
+    data: { labels: Object.keys(groupType), datasets: [{ data: Object.values(groupType) }] },
+    options: { responsive:true, maintainAspectRatio:false, plugins:{ legend:{ position:'bottom', labels:{ boxWidth:8, font:{ size:10 } } } } }
   });
 
-  // Trend Line
   new Chart(document.getElementById('chartTrend'), {
     type: 'line',
-    data: { labels: trendLabels, datasets: [{ label:'Lamaran', data: trendData, tension:.25 }] },
-    options: { responsive:true, maintainAspectRatio:false, plugins:{ legend:{ display:false } }, scales:{ y:{ beginAtZero:true, ticks:{ precision:0 } } } }
+    data: { labels: trendLabels, datasets: [{ label:'Lamaran', data: trendData, tension:.25, pointRadius:1 }] },
+    options: tinyOpts(false)
   });
 
-  // Avg Salary per Status (Bar)
   new Chart(document.getElementById('chartSalaryStatus'), {
     type: 'bar',
-    data: {
-      labels: statusesList,
-      datasets: [{
-        label: 'Rata-rata Gaji (IDR)',
-        data: statusesList.map(s => avgSalaryBySt[s] ?? null)
-      }]
-    },
-    options: {
-      responsive:true,
-      maintainAspectRatio:false,
-      plugins:{ legend:{ display:false }, tooltip:{ callbacks:{ label:(ctx)=> {
-        const v = ctx.parsed.y; if (v==null) return 'N/A';
-        // format pendek ribuan
-        const fmt = new Intl.NumberFormat('id-ID');
-        return 'Rp ' + fmt.format(Math.round(v));
-      }}}},
-      scales:{ y:{ beginAtZero:true } }
-    }
+    data: { labels: statusesList, datasets: [{ label:'Avg Gaji (IDR)', data: statusesList.map(s=>avgSalaryBySt[s]??null) }] },
+    options: tinyOpts(false)
   });
-
 })();
 </script>
 </body>
