@@ -241,7 +241,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 /* ========= Read data & aggregations ========= */
 $rows = []; try { $rows = turso_exec("SELECT * FROM jobs ORDER BY id DESC")['rows']; } catch (Exception $e) { $rows=[]; }
 
-$statuses_list = ['dilamar','ditolak','diterima','tidak ada respon','interview','tes tulis','psikotes','mini project'];
+$statuses_list = ['dilamar','ditolak','diterima','tidak ada respon','interview','tes tulis','psikotes','mini project','tidak lanjut'];
 
 function kv($rows, $k){ $o=[]; foreach($rows as $r){ $o[$r[$k] ?? '']=(int)($r['cnt'] ?? 0);} return $o; }
 $stats = [
@@ -308,7 +308,8 @@ $types = ['kontrak','fulltime','freelance','remote','hybrid','part time'];
 .badge-status.dilamar{ background:#e7f1ff; color:#0d6efd; }
 .badge-status.ditolak{ background:#fde8e8; color:#c1121f; }
 .badge-status.diterima{ background:#e6f7ed; color:#0f8b3e; }
-.badge-status.tidak\ ada\ respon{ background:#f3f4f6; color:#6b7280;}
+.badge-status.tidak\ ada\ respon{ background:#f3f4f6; color:#0aa;}
+.badge-status.tidak\ lanjut{ background:#f3f4f6; color:#070707FF;}
 .badge-status.interview{ background:#fff7e6; color:#b25e09; }
 .badge-status.tes\ tulis{ background:#f3e8ff; color:#6f42c1; }
 .badge-status.psikotes{ background:#e6fffb; color:#0aa; }
@@ -338,8 +339,8 @@ $types = ['kontrak','fulltime','freelance','remote','hybrid','part time'];
   <div class="container">
     <div class="d-flex align-items-center justify-content-between flex-wrap gap-2">
       <div>
-        <h1 class="h5 mb-0">Track Lamaran Sayangku</h1>
-        <div class="opacity-75 small">Bismillah dan Barokah</div>
+        <h1 class="h5 mb-0">Track Lamaran Fadilla</h1>
+        <div class="opacity-75 small">Semoga sayangku diberi pekerjaan yang barokah</div>
       </div>
       <div class="d-flex align-items-center gap-2">
         <!-- Filters -->
@@ -356,7 +357,7 @@ $types = ['kontrak','fulltime','freelance','remote','hybrid','part time'];
           <?php endforeach; ?>
         </select>
         <button class="btn btn-light btn-add shadow-sm" data-bs-toggle="modal" data-bs-target="#modalForm">
-          <i class="bi bi-plus-lg me-1"></i> Tambah
+          <i class="bi bi-plus-lg me-1"></i> 
         </button>
       </div>
     </div>
