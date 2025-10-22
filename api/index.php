@@ -8,13 +8,22 @@
 date_default_timezone_set('Asia/Jakarta');
 
 // ==== ENV (set di Vercel: TURSO_URL & TURSO_TOKEN) ====
-$TURSO_URL   = getenv('TURSO_URL') ?: '';   // ex: https://<db>-<org>.turso.io/v2/pipeline
+$TURSO_URL   = getenv('TURSO_URL') ?: '';
 $TURSO_TOKEN = getenv('TURSO_TOKEN') ?: '';
 
-if (!$TURSO_URL || !$TURSO_TOKEN) {
-  http_response_code(500);
-  echo "<h3>Missing ENV</h3><p>Set <b>TURSO_URL</b> (pakai HTTP + <code>/v2/pipeline</code>) & <b>TURSO_TOKEN</b> di Vercel.</p>";
-  exit;
+// Normalizer: terima libsql:// lalu ubah ke https://.../v2/pipeline
+if ($TURSO_URL) {
+  if (strpos($TURSO_URL, 'libsql://') === 0) {
+    // libsql://host[:port][?params] -> https://host/v2/pipeline (params diabaikan)
+    $u = preg_replace('#^libsql://#','https://',$TURSO_URL);
+    $u = preg_replace('#/+$#','',$u);
+    if (!preg_match('#/v2/pipeline$#',$u)) $u .= '/v2/pipeline';
+    $TURSO_URL = $u;
+  } elseif (strpos($TURSO_URL, 'http') === 0) {
+    // pastikan ada /v2/pipeline
+    $TURSO_URL = rtrim($TURSO_URL, '/');
+    if (!preg_match('#/v2/pipeline$#',$TURSO_URL)) $TURSO_URL .= '/v2/pipeline';
+  }
 }
 
 /* ========== TURSO HTTP CLIENT (Hrana over HTTP) ========== */
