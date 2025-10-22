@@ -431,7 +431,7 @@ $types    = ['kontrak','fulltime','freelance','remote','hybrid','part time'];
     </div>
 
     <!-- Charts -->
-    <div class="row g-3 mb-4">
+    <!-- <div class="row g-3 mb-4">
       <div class="col-12 col-lg-6">
         <div class="border rounded-3 p-3 bg-white">
           <div class="d-flex justify-content-between align-items-center mb-2">
@@ -469,7 +469,7 @@ $types    = ['kontrak','fulltime','freelance','remote','hybrid','part time'];
           <canvas id="chartSalaryStatus" height="120"></canvas>
         </div>
       </div>
-    </div>
+    </div> -->
 
     <!-- Table -->
     <div class="table-responsive">
